@@ -20,8 +20,9 @@ type Player = {
 };
 
 type ApiOkMe = { ok: true; user: TgUser; joined: boolean; player: Player | null };
-type ApiOkJoin = { ok: true; player: Player | null };
+type ApiOkJoin = { ok: true; player: Player | null; action?: string };
 type ApiOkPlayers = { ok: true; players: Player[] };
+type ApiOkDebug = { ok: true; message: string; sampleCount: number };
 type ApiFail = { ok: false; error: string; details?: any };
 
 function getTg() {
@@ -36,6 +37,24 @@ function meName(u: TgUser | null) {
   return `User ${u.id}`;
 }
 
+async function fetchJsonWithTimeout(url: string, options: RequestInit, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      json = { ok: false, error: "Non-JSON response from server", raw: text };
+    }
+    return json;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export default function App() {
   const tg = useMemo(() => getTg(), []);
   const [screen, setScreen] = useState<"loading" | "join" | "league" | "error">("loading");
@@ -43,35 +62,64 @@ export default function App() {
   const [user, setUser] = useState<TgUser | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [raw, setRaw] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
 
   async function apiPost<T>(path: string): Promise<T | ApiFail> {
     const initData = tg?.initData;
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData })
-    });
-    return (await res.json()) as any;
+    return (await fetchJsonWithTimeout(
+      path,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData })
+      },
+      15000
+    )) as any;
+  }
+
+  async function debugAirtable() {
+    setBusy(true);
+    setStatus("Debug: checking Airtable…");
+    try {
+      const json = await apiPost<ApiOkDebug>("/api/debug/airtable");
+      setRaw(json);
+      if ((json as any).ok) {
+        setStatus(`Airtable OK (sampleCount=${(json as any).sampleCount})`);
+      } else {
+        setStatus(`Airtable error: ${(json as any).error}`);
+        setScreen("error");
+      }
+    } catch (e: any) {
+      setStatus(`Debug failed: ${String(e?.message || e)}`);
+      setScreen("error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadPlayers() {
+    setBusy(true);
     setStatus("Loading players…");
-    const json = await apiPost<ApiOkPlayers>("/api/players");
-    setRaw(json);
+    try {
+      const json = await apiPost<ApiOkPlayers>("/api/players");
+      setRaw(json);
 
-    if ((json as any).ok) {
-      setPlayers((json as any).players || []);
-      setStatus("OK");
-      setScreen("league");
-    } else {
-      setStatus(`Error: ${(json as any).error}`);
-      setScreen("error");
+      if ((json as any).ok) {
+        setPlayers((json as any).players || []);
+        setStatus("OK");
+        setScreen("league");
+      } else {
+        setStatus(`Error: ${(json as any).error}`);
+        setScreen("error");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
   async function checkMe() {
     if (!tg) {
-      setStatus("Открой это внутри Telegram как Mini App.");
+      setStatus("Open this inside Telegram (Mini App). Normal browsers won’t have Telegram initData.");
       setScreen("error");
       return;
     }
@@ -80,44 +128,59 @@ export default function App() {
     tg.expand?.();
 
     if (!tg.initData) {
-      setStatus("initData пустая. Открывай Mini App через кнопку меню бота (Web App).");
+      setStatus("initData is empty. Open via the bot’s Web App button (menu button), not as a normal link.");
       setScreen("error");
       return;
     }
 
+    setBusy(true);
     setStatus("Checking membership…");
-    const json = await apiPost<ApiOkMe>("/api/me");
-    setRaw(json);
+    try {
+      const json = await apiPost<ApiOkMe>("/api/me");
+      setRaw(json);
 
-    if (!(json as any).ok) {
-      setStatus(`Error: ${(json as any).error}`);
-      setScreen("error");
-      return;
-    }
+      if (!(json as any).ok) {
+        setStatus(`Error: ${(json as any).error}`);
+        setScreen("error");
+        return;
+      }
 
-    const me = json as ApiOkMe;
-    setUser(me.user);
+      const me = json as ApiOkMe;
+      setUser(me.user);
 
-    if (me.joined) {
-      await loadPlayers();
-    } else {
-      setStatus("Not joined yet");
-      setScreen("join");
+      if (me.joined) {
+        await loadPlayers();
+      } else {
+        setStatus("Not joined yet");
+        setScreen("join");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
   async function joinLeague() {
+    setBusy(true);
     setStatus("Joining league…");
-    const json = await apiPost<ApiOkJoin>("/api/join");
-    setRaw(json);
+    try {
+      const json = await apiPost<ApiOkJoin>("/api/join");
+      setRaw(json);
 
-    if (!(json as any).ok) {
-      setStatus(`Error: ${(json as any).error}`);
+      if (!(json as any).ok) {
+        setStatus(`Join failed: ${(json as any).error}`);
+        setScreen("error");
+        return;
+      }
+
+      setStatus(`Joined (${(json as any).action || "ok"}). Loading players…`);
+      await loadPlayers();
+    } catch (e: any) {
+      // AbortError from timeout ends up here sometimes depending on browser/WebView
+      setStatus(`Join request failed (timeout/network): ${String(e?.message || e)}`);
       setScreen("error");
-      return;
+    } finally {
+      setBusy(false);
     }
-
-    await loadPlayers();
   }
 
   useEffect(() => {
@@ -130,12 +193,12 @@ export default function App() {
       <h2 style={{ margin: "0 0 8px" }}>Padel League</h2>
       <div style={{ marginBottom: 12, opacity: 0.85 }}>{user ? `You: ${meName(user)}` : " "}</div>
 
-      {screen === "loading" && <p style={{ margin: 0 }}>{status}</p>}
+      <p style={{ marginTop: 0 }}>{status}</p>
 
       {screen === "join" && (
         <div>
-          <p style={{ marginTop: 0 }}>Ты ещё не в лиге. Нажми кнопку, чтобы добавить себя в Airtable.</p>
           <button
+            disabled={busy}
             onClick={joinLeague}
             style={{
               padding: "12px 14px",
@@ -143,27 +206,43 @@ export default function App() {
               border: "1px solid #ccc",
               background: "white",
               fontWeight: 700,
-              cursor: "pointer"
+              cursor: busy ? "not-allowed" : "pointer"
             }}
           >
             Join Padel League
           </button>
-          <p style={{ margin: "12px 0 0", opacity: 0.8 }}>{status}</p>
+
+          <div style={{ marginTop: 10 }}>
+            <button
+              disabled={busy}
+              onClick={debugAirtable}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid #ccc",
+                background: "white",
+                cursor: busy ? "not-allowed" : "pointer"
+              }}
+            >
+              Debug Airtable
+            </button>
+          </div>
         </div>
       )}
 
       {screen === "league" && (
         <div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-            <h3 style={{ margin: "0 0 10px" }}>Players (Individual Rating)</h3>
+            <h3 style={{ margin: "8px 0 10px" }}>Players (Individual Rating)</h3>
             <button
+              disabled={busy}
               onClick={loadPlayers}
               style={{
                 padding: "8px 10px",
                 borderRadius: 10,
                 border: "1px solid #ccc",
                 background: "white",
-                cursor: "pointer"
+                cursor: busy ? "not-allowed" : "pointer"
               }}
             >
               Refresh
@@ -171,7 +250,7 @@ export default function App() {
           </div>
 
           {players.length === 0 ? (
-            <p style={{ marginTop: 0 }}>Пока нет игроков.</p>
+            <p style={{ marginTop: 0 }}>No players yet.</p>
           ) : (
             <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, overflow: "hidden" }}>
               {players.map((p, idx) => (
@@ -208,17 +287,40 @@ export default function App() {
               ))}
             </div>
           )}
-
-          <p style={{ margin: "12px 0 0", opacity: 0.8 }}>{status}</p>
         </div>
       )}
 
       {screen === "error" && (
         <div>
-          <p style={{ marginTop: 0, color: "#b00020", fontWeight: 800 }}>Ошибка</p>
-          <pre style={{ background: "#f6f6f6", padding: 12, borderRadius: 8, overflowX: "auto" }}>
-            {status}
-          </pre>
+          <p style={{ color: "#b00020", fontWeight: 800 }}>Error</p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              disabled={busy}
+              onClick={checkMe}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid #ccc",
+                background: "white",
+                cursor: busy ? "not-allowed" : "pointer"
+              }}
+            >
+              Retry
+            </button>
+            <button
+              disabled={busy}
+              onClick={debugAirtable}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid #ccc",
+                background: "white",
+                cursor: busy ? "not-allowed" : "pointer"
+              }}
+            >
+              Debug Airtable
+            </button>
+          </div>
         </div>
       )}
 
