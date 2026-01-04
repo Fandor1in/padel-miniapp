@@ -1,11 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-type TgUser = {
-  id: number;
-  first_name?: string;
-  last_name?: string;
-  username?: string;
-};
+type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 
 type Player = {
   id: string;
@@ -16,14 +11,12 @@ type Player = {
   gamesPlayed: number;
   wins: number;
   losses: number;
-  lastUpdated: string | null;
 };
 
 type ApiOkMe = { ok: true; user: TgUser; joined: boolean; player: Player | null };
 type ApiOkJoin = { ok: true; player: Player | null; action?: string };
 type ApiOkPlayers = { ok: true; players: Player[] };
-type ApiOkDebug = { ok: true; message: string; sampleCount: number };
-type ApiFail = { ok: false; error: string; details?: any };
+type ApiFail = { ok: false; error: string; details?: any; status?: number; raw?: string };
 
 function getTg() {
   return (window as any).Telegram?.WebApp;
@@ -40,16 +33,22 @@ function meName(u: TgUser | null) {
 async function fetchJsonWithTimeout(url: string, options: RequestInit, timeoutMs = 15000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
+    const contentType = res.headers.get("content-type") || "";
     const text = await res.text();
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {
-      json = { ok: false, error: "Non-JSON response from server", raw: text };
+
+    if (contentType.includes("application/json")) {
+      try {
+        return JSON.parse(text || "{}");
+      } catch {
+        return { ok: false, error: "Invalid JSON from server", status: res.status, raw: text };
+      }
     }
-    return json;
+
+    // Not JSON: return raw body for debugging
+    return { ok: false, error: "Non-JSON response from server", status: res.status, raw: text };
   } finally {
     clearTimeout(t);
   }
@@ -77,26 +76,6 @@ export default function App() {
     )) as any;
   }
 
-  async function debugAirtable() {
-    setBusy(true);
-    setStatus("Debug: checking Airtable…");
-    try {
-      const json = await apiPost<ApiOkDebug>("/api/debug/airtable");
-      setRaw(json);
-      if ((json as any).ok) {
-        setStatus(`Airtable OK (sampleCount=${(json as any).sampleCount})`);
-      } else {
-        setStatus(`Airtable error: ${(json as any).error}`);
-        setScreen("error");
-      }
-    } catch (e: any) {
-      setStatus(`Debug failed: ${String(e?.message || e)}`);
-      setScreen("error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function loadPlayers() {
     setBusy(true);
     setStatus("Loading players…");
@@ -119,7 +98,7 @@ export default function App() {
 
   async function checkMe() {
     if (!tg) {
-      setStatus("Open this inside Telegram (Mini App). Normal browsers won’t have Telegram initData.");
+      setStatus("Open this inside Telegram (Mini App).");
       setScreen("error");
       return;
     }
@@ -128,7 +107,7 @@ export default function App() {
     tg.expand?.();
 
     if (!tg.initData) {
-      setStatus("initData is empty. Open via the bot’s Web App button (menu button), not as a normal link.");
+      setStatus("initData is empty. Open via the bot's Web App (menu button).");
       setScreen("error");
       return;
     }
@@ -167,17 +146,15 @@ export default function App() {
       setRaw(json);
 
       if (!(json as any).ok) {
-        setStatus(`Join failed: ${(json as any).error}`);
+        const j = json as any;
+        const extra = j.raw ? `\n\nRAW:\n${String(j.raw).slice(0, 800)}` : "";
+        setStatus(`Join failed: ${j.error}${extra}`);
         setScreen("error");
         return;
       }
 
       setStatus(`Joined (${(json as any).action || "ok"}). Loading players…`);
       await loadPlayers();
-    } catch (e: any) {
-      // AbortError from timeout ends up here sometimes depending on browser/WebView
-      setStatus(`Join request failed (timeout/network): ${String(e?.message || e)}`);
-      setScreen("error");
     } finally {
       setBusy(false);
     }
@@ -196,38 +173,20 @@ export default function App() {
       <p style={{ marginTop: 0 }}>{status}</p>
 
       {screen === "join" && (
-        <div>
-          <button
-            disabled={busy}
-            onClick={joinLeague}
-            style={{
-              padding: "12px 14px",
-              borderRadius: 10,
-              border: "1px solid #ccc",
-              background: "white",
-              fontWeight: 700,
-              cursor: busy ? "not-allowed" : "pointer"
-            }}
-          >
-            Join Padel League
-          </button>
-
-          <div style={{ marginTop: 10 }}>
-            <button
-              disabled={busy}
-              onClick={debugAirtable}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: "1px solid #ccc",
-                background: "white",
-                cursor: busy ? "not-allowed" : "pointer"
-              }}
-            >
-              Debug Airtable
-            </button>
-          </div>
-        </div>
+        <button
+          disabled={busy}
+          onClick={joinLeague}
+          style={{
+            padding: "12px 14px",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+            background: "white",
+            fontWeight: 700,
+            cursor: busy ? "not-allowed" : "pointer"
+          }}
+        >
+          Join Padel League
+        </button>
       )}
 
       {screen === "league" && (
@@ -249,79 +208,55 @@ export default function App() {
             </button>
           </div>
 
-          {players.length === 0 ? (
-            <p style={{ marginTop: 0 }}>No players yet.</p>
-          ) : (
-            <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, overflow: "hidden" }}>
-              {players.map((p, idx) => (
-                <div
-                  key={p.id}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "42px 1fr 90px",
-                    gap: 12,
-                    padding: "10px 12px",
-                    borderTop: idx === 0 ? "none" : "1px solid #eee",
-                    background: "white",
-                    alignItems: "center"
-                  }}
-                >
-                  <div style={{ fontWeight: 900, textAlign: "center" }}>{idx + 1}</div>
-
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 800 }}>
-                      {p.name || "Unnamed"}
-                      {p.telegramUsername ? (
-                        <span style={{ fontWeight: 600, opacity: 0.75 }}> @{p.telegramUsername}</span>
-                      ) : null}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>
-                      GP {p.gamesPlayed} | W {p.wins} | L {p.losses}
-                    </div>
+          <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, overflow: "hidden" }}>
+            {players.map((p, idx) => (
+              <div
+                key={p.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "42px 1fr 90px",
+                  gap: 12,
+                  padding: "10px 12px",
+                  borderTop: idx === 0 ? "none" : "1px solid #eee",
+                  background: "white",
+                  alignItems: "center"
+                }}
+              >
+                <div style={{ fontWeight: 900, textAlign: "center" }}>{idx + 1}</div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 800 }}>
+                    {p.name || "Unnamed"}
+                    {p.telegramUsername ? (
+                      <span style={{ fontWeight: 600, opacity: 0.75 }}> @{p.telegramUsername}</span>
+                    ) : null}
                   </div>
-
-                  <div style={{ fontWeight: 900, fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
-                    {p.rating}
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    GP {p.gamesPlayed} | W {p.wins} | L {p.losses}
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
+                <div style={{ fontWeight: 900, fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
+                  {p.rating}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
       {screen === "error" && (
-        <div>
-          <p style={{ color: "#b00020", fontWeight: 800 }}>Error</p>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              disabled={busy}
-              onClick={checkMe}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: "1px solid #ccc",
-                background: "white",
-                cursor: busy ? "not-allowed" : "pointer"
-              }}
-            >
-              Retry
-            </button>
-            <button
-              disabled={busy}
-              onClick={debugAirtable}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: "1px solid #ccc",
-                background: "white",
-                cursor: busy ? "not-allowed" : "pointer"
-              }}
-            >
-              Debug Airtable
-            </button>
-          </div>
-        </div>
+        <button
+          disabled={busy}
+          onClick={checkMe}
+          style={{
+            padding: "8px 10px",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+            background: "white",
+            cursor: busy ? "not-allowed" : "pointer"
+          }}
+        >
+          Retry
+        </button>
       )}
 
       <details style={{ marginTop: 14, opacity: 0.9 }}>

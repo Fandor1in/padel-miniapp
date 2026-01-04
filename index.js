@@ -21,7 +21,7 @@ function cfg() {
     AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
     AIRTABLE_PLAYERS_TABLE: process.env.AIRTABLE_PLAYERS_TABLE || 'Players',
 
-    // Fields (match your Airtable screenshots)
+    // Fields (match your screenshots)
     FIELD_NAME: 'Name',
     FIELD_TELEGRAM_ID: 'Telegram ID',
     FIELD_TELEGRAM_USERNAME: 'Telegram Username',
@@ -29,14 +29,13 @@ function cfg() {
     FIELD_GAMES_PLAYED: 'Games Played',
     FIELD_WINS: 'Wins',
     FIELD_LOSSES: 'Losses',
-    FIELD_LAST_UPDATED: 'Last Updated',
 
     DEFAULT_RATING: Number(process.env.DEFAULT_RATING || 1000),
     AIRTABLE_TIMEOUT_MS: Number(process.env.AIRTABLE_TIMEOUT_MS || 12000),
   };
 }
 
-// Simple request log (no secrets)
+// Basic request log (no secrets)
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -59,7 +58,7 @@ function requireEnvForAirtable(res) {
 
 function airtableHeaders() {
   const c = cfg();
-  // Airtable auth is Bearer token :contentReference[oaicite:2]{index=2}
+  // Airtable auth uses Bearer token (PAT) :contentReference[oaicite:1]{index=1}
   return {
     Authorization: `Bearer ${c.AIRTABLE_TOKEN}`,
     'Content-Type': 'application/json',
@@ -68,7 +67,7 @@ function airtableHeaders() {
 
 function airtablePlayersUrl() {
   const c = cfg();
-  // /v0/{baseId}/{tableNameOrId} :contentReference[oaicite:3]{index=3}
+  // /v0/{baseId}/{tableNameOrId} :contentReference[oaicite:2]{index=2}
   return `${AIRTABLE_API}/${encodeURIComponent(
     c.AIRTABLE_BASE_ID
   )}/${encodeURIComponent(c.AIRTABLE_PLAYERS_TABLE)}`;
@@ -122,7 +121,7 @@ function getInitDataFromReq(req) {
   return req.headers['x-telegram-init-data'] || req.body?.initData || '';
 }
 
-// Telegram requires server-side initData validation before trust :contentReference[oaicite:4]{index=4}
+// Telegram initData must be validated server-side :contentReference[oaicite:3]{index=3}
 function validateTelegramInitDataOrThrow(initData) {
   const c = cfg();
   if (!c.BOT_TOKEN) {
@@ -177,7 +176,6 @@ function normalizePlayer(rec) {
       typeof f[c.FIELD_LOSSES] === 'number'
         ? f[c.FIELD_LOSSES]
         : Number(f[c.FIELD_LOSSES] || 0),
-    lastUpdated: f[c.FIELD_LAST_UPDATED] || null,
   };
 }
 
@@ -185,17 +183,18 @@ async function findPlayerByTelegramId(telegramIdNumber) {
   const c = cfg();
   const params = new URLSearchParams();
   params.set('maxRecords', '1');
+  // filterByFormula is the standard way to query by field :contentReference[oaicite:4]{index=4}
   params.set(
     'filterByFormula',
     `{${c.FIELD_TELEGRAM_ID}} = ${telegramIdNumber}`
-  ); // :contentReference[oaicite:5]{index=5}
+  );
   const url = `${airtablePlayersUrl()}?${params.toString()}`;
   const data = await airtableRequest('GET', url);
   return data?.records?.[0] || null;
 }
 
 async function createPlayer(fields) {
-  // Airtable create records format: { records: [{ fields: {...}}] } :contentReference[oaicite:6]{index=6}
+  // Create records expects { records: [{ fields: {...} }] } :contentReference[oaicite:5]{index=5}
   const data = await airtableRequest('POST', airtablePlayersUrl(), {
     records: [{ fields }],
   });
@@ -218,7 +217,7 @@ async function listPlayersByRating() {
     const params = new URLSearchParams();
     params.set('pageSize', '100');
     params.set('sort[0][field]', c.FIELD_INDIVIDUAL_RATING);
-    params.set('sort[0][direction]', 'desc'); // :contentReference[oaicite:7]{index=7}
+    params.set('sort[0][direction]', 'desc');
     if (offset) params.set('offset', offset);
 
     const url = `${airtablePlayersUrl()}?${params.toString()}`;
@@ -230,32 +229,9 @@ async function listPlayersByRating() {
   return records;
 }
 
-// ---------------- API ----------------
+// -------- API --------
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
-
-// Debug: confirm Airtable auth/base/table are correct
-app.post('/api/debug/airtable', async (req, res) => {
-  try {
-    if (!requireEnvForAirtable(res)) return;
-    const initData = getInitDataFromReq(req);
-    validateTelegramInitDataOrThrow(initData);
-
-    const url = `${airtablePlayersUrl()}?pageSize=1`;
-    const data = await airtableRequest('GET', url);
-
-    res.json({
-      ok: true,
-      message: 'Airtable reachable',
-      sampleCount: Array.isArray(data?.records) ? data.records.length : 0,
-    });
-  } catch (e) {
-    console.error('debug airtable error:', e?.message, e?.details || '');
-    res
-      .status(e.status || 500)
-      .json({ ok: false, error: e.message, details: e.details || null });
-  }
-});
 
 app.post('/api/me', async (req, res) => {
   try {
@@ -305,16 +281,13 @@ app.post('/api/join', async (req, res) => {
     const name = displayNameFromTg(user);
     const username = user.username || '';
 
-    console.log('join: telegramId =', telegramId);
-
     const existing = await findPlayerByTelegramId(telegramId);
 
     if (existing) {
-      console.log('join: existing record =', existing.id);
+      // Update identity fields only. Do NOT touch computed fields.
       const saved = await updatePlayer(existing.id, {
         [c.FIELD_NAME]: name,
         [c.FIELD_TELEGRAM_USERNAME]: username,
-        [c.FIELD_LAST_UPDATED]: new Date().toISOString(),
       });
       return res.json({
         ok: true,
@@ -323,7 +296,7 @@ app.post('/api/join', async (req, res) => {
       });
     }
 
-    console.log('join: creating new player');
+    // Create new player. Do NOT set "Last Updated" because it's computed in your base.
     const created = await createPlayer({
       [c.FIELD_NAME]: name,
       [c.FIELD_TELEGRAM_ID]: telegramId,
@@ -332,7 +305,6 @@ app.post('/api/join', async (req, res) => {
       [c.FIELD_GAMES_PLAYED]: 0,
       [c.FIELD_WINS]: 0,
       [c.FIELD_LOSSES]: 0,
-      [c.FIELD_LAST_UPDATED]: new Date().toISOString(),
     });
 
     return res.json({
@@ -365,16 +337,27 @@ app.post('/api/players', async (req, res) => {
   }
 });
 
-// ---------------- Frontend serving ----------------
+// Force JSON 404 for any unknown /api route
+app.use('/api', (req, res) =>
+  res.status(404).json({ ok: false, error: 'Not found' })
+);
 
+// -------- Frontend serving --------
 const distPath = path.join(__dirname, 'web', 'dist');
 app.use(express.static(distPath));
 
 // Express v5 catch-all must be named
 app.get('/*splat', (req, res) => {
-  if (req.path.startsWith('/api'))
-    return res.status(404).json({ ok: false, error: 'Not found' });
   return res.sendFile(path.join(distPath, 'index.html'));
+});
+
+// Final safety: return JSON for unhandled API errors
+app.use((err, req, res, next) => {
+  console.error('unhandled error:', err);
+  if (req.path.startsWith('/api')) {
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+  next(err);
 });
 
 const port = process.env.PORT || 8080;
