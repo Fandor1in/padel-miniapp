@@ -1,6 +1,7 @@
 {
   "name": "padel-miniapp",
   "version": "1.0.0",
+  "description": "Telegram Mini App: Padel League (Express backend + React/Vite frontend)",
   "private": true,
   "type": "module",
   "main": "index.js",
@@ -8,11 +9,15 @@
     "node": "22.x"
   },
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "concurrently \"node --watch index.js\" \"npm --prefix web run dev\"",
+    "build": "npm --prefix web install && npm --prefix web run build",
+    "start": "node index.js"
   },
   "dependencies": {
     "@tma.js/init-data-node": "^2.0.6",
     "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
   }
 }
