@@ -71,7 +71,7 @@ export default function App() {
 
   async function checkMe() {
     if (!tg) {
-      setStatus("Открой это внутри Telegram как Mini App, не в обычном браузере.");
+      setStatus("Открой это внутри Telegram как Mini App.");
       setScreen("error");
       return;
     }
@@ -80,7 +80,7 @@ export default function App() {
     tg.expand?.();
 
     if (!tg.initData) {
-      setStatus("initData пустая. Открывай Mini App кнопкой (menu button), не как ссылку.");
+      setStatus("initData пустая. Открывай Mini App через кнопку меню бота (Web App).");
       setScreen("error");
       return;
     }
@@ -128,18 +128,13 @@ export default function App() {
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, lineHeight: 1.4, maxWidth: 820 }}>
       <h2 style={{ margin: "0 0 8px" }}>Padel League</h2>
-      <div style={{ marginBottom: 12, opacity: 0.85 }}>
-        {user ? `You: ${meName(user)}` : " "}
-      </div>
+      <div style={{ marginBottom: 12, opacity: 0.85 }}>{user ? `You: ${meName(user)}` : " "}</div>
 
       {screen === "loading" && <p style={{ margin: 0 }}>{status}</p>}
 
       {screen === "join" && (
         <div>
-          <p style={{ marginTop: 0 }}>
-            Ты ещё не в лиге. Нажми кнопку, чтобы создать игрока в Airtable.
-          </p>
-
+          <p style={{ marginTop: 0 }}>Ты ещё не в лиге. Нажми кнопку, чтобы добавить себя в Airtable.</p>
           <button
             onClick={joinLeague}
             style={{
@@ -153,7 +148,6 @@ export default function App() {
           >
             Join Padel League
           </button>
-
           <p style={{ margin: "12px 0 0", opacity: 0.8 }}>{status}</p>
         </div>
       )}
@@ -161,7 +155,7 @@ export default function App() {
       {screen === "league" && (
         <div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-            <h3 style={{ margin: "0 0 10px" }}>Players (by Individual Rating)</h3>
+            <h3 style={{ margin: "0 0 10px" }}>Players (Individual Rating)</h3>
             <button
               onClick={loadPlayers}
               style={{
@@ -193,7 +187,7 @@ export default function App() {
                     alignItems: "center"
                   }}
                 >
-                  <div style={{ fontWeight: 800, textAlign: "center" }}>{idx + 1}</div>
+                  <div style={{ fontWeight: 900, textAlign: "center" }}>{idx + 1}</div>
 
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 800 }}>

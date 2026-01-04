@@ -1,23 +1,19 @@
 {
-  "name": "padel-miniapp-web",
-  "private": true,
+  "name": "padel-miniapp",
   "version": "1.0.0",
+  "description": "Telegram Mini App: Padel League (Express backend + React/Vite frontend)",
+  "private": true,
   "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
-    "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0 --port 5173"
+    "build": "npm --prefix web install && npm --prefix web run build",
+    "start": "node index.js"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.5",
-    "@types/react-dom": "^18.3.0",
-    "@types/telegram-web-app": "^1.0.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "typescript": "^5.5.4",
-    "vite": "^5.4.2"
+    "@tma.js/init-data-node": "^2.0.6",
+    "express": "^5.2.1"
   }
 }

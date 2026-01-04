@@ -13,27 +13,21 @@ const AIRTABLE_API = 'https://api.airtable.com/v0';
 
 function cfg() {
   return {
-    // Telegram
     BOT_TOKEN: process.env.BOT_TOKEN,
 
-    // Airtable
     AIRTABLE_TOKEN: process.env.AIRTABLE_TOKEN,
     AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
     AIRTABLE_PLAYERS_TABLE: process.env.AIRTABLE_PLAYERS_TABLE || 'Players',
 
-    // Fields (match your screenshots by default)
-    FIELD_NAME: process.env.AIRTABLE_FIELD_NAME || 'Name',
-    FIELD_TELEGRAM_ID: process.env.AIRTABLE_FIELD_TELEGRAM_ID || 'Telegram ID',
-    FIELD_TELEGRAM_USERNAME:
-      process.env.AIRTABLE_FIELD_TELEGRAM_USERNAME || 'Telegram Username',
-    FIELD_INDIVIDUAL_RATING:
-      process.env.AIRTABLE_FIELD_INDIVIDUAL_RATING || 'Individual Rating',
-    FIELD_GAMES_PLAYED:
-      process.env.AIRTABLE_FIELD_GAMES_PLAYED || 'Games Played',
-    FIELD_WINS: process.env.AIRTABLE_FIELD_WINS || 'Wins',
-    FIELD_LOSSES: process.env.AIRTABLE_FIELD_LOSSES || 'Losses',
-    FIELD_LAST_UPDATED:
-      process.env.AIRTABLE_FIELD_LAST_UPDATED || 'Last Updated',
+    // твоё поле Players
+    FIELD_NAME: 'Name',
+    FIELD_TELEGRAM_ID: 'Telegram ID',
+    FIELD_TELEGRAM_USERNAME: 'Telegram Username',
+    FIELD_INDIVIDUAL_RATING: 'Individual Rating',
+    FIELD_GAMES_PLAYED: 'Games Played',
+    FIELD_WINS: 'Wins',
+    FIELD_LOSSES: 'Losses',
+    FIELD_LAST_UPDATED: 'Last Updated',
 
     DEFAULT_RATING: Number(process.env.DEFAULT_RATING || 1000),
   };
@@ -45,12 +39,10 @@ function requireEnvForAirtable(res) {
   if (!c.AIRTABLE_TOKEN) missing.push('AIRTABLE_TOKEN');
   if (!c.AIRTABLE_BASE_ID) missing.push('AIRTABLE_BASE_ID');
   if (!c.AIRTABLE_PLAYERS_TABLE) missing.push('AIRTABLE_PLAYERS_TABLE');
-
   if (missing.length) {
-    res.status(500).json({
-      ok: false,
-      error: `Airtable env is not configured. Missing: ${missing.join(', ')}`,
-    });
+    res
+      .status(500)
+      .json({ ok: false, error: `Missing env: ${missing.join(', ')}` });
     return false;
   }
   return true;
@@ -64,9 +56,8 @@ function airtableHeaders() {
   };
 }
 
-function airtablePlayersTableUrl() {
+function airtablePlayersUrl() {
   const c = cfg();
-  // /v0/{baseId}/{tableIdOrName} :contentReference[oaicite:5]{index=5}
   return `${AIRTABLE_API}/${encodeURIComponent(
     c.AIRTABLE_BASE_ID
   )}/${encodeURIComponent(c.AIRTABLE_PLAYERS_TABLE)}`;
@@ -98,10 +89,13 @@ async function airtableRequest(method, url, body) {
   return json;
 }
 
-// Telegram initData validation (must be server-side) :contentReference[oaicite:6]{index=6}
+function getInitDataFromReq(req) {
+  return req.headers['x-telegram-init-data'] || req.body?.initData || '';
+}
+
+// Telegram: доверять только initData и только после проверки на сервере :contentReference[oaicite:5]{index=5}
 function validateTelegramInitDataOrThrow(initData) {
   const c = cfg();
-
   if (!c.BOT_TOKEN) {
     const err = new Error('BOT_TOKEN is not set');
     err.status = 500;
@@ -112,22 +106,15 @@ function validateTelegramInitDataOrThrow(initData) {
     err.status = 400;
     throw err;
   }
-
-  const ok = isValid(initData, c.BOT_TOKEN); // boolean :contentReference[oaicite:7]{index=7}
-  if (!ok) {
+  if (!isValid(initData, c.BOT_TOKEN)) {
     const err = new Error('Invalid initData');
     err.status = 401;
     throw err;
   }
-
   return parse(initData);
 }
 
-function getInitDataFromReq(req) {
-  return req.headers['x-telegram-init-data'] || req.body?.initData || '';
-}
-
-function buildDisplayNameFromTelegramUser(user) {
+function displayNameFromTg(user) {
   const full = [user?.first_name, user?.last_name]
     .filter(Boolean)
     .join(' ')
@@ -137,7 +124,7 @@ function buildDisplayNameFromTelegramUser(user) {
   return `User ${user?.id ?? ''}`.trim();
 }
 
-function normalizePlayerRecord(rec) {
+function normalizePlayer(rec) {
   const c = cfg();
   const f = rec.fields || {};
   return {
@@ -165,55 +152,47 @@ function normalizePlayerRecord(rec) {
   };
 }
 
-async function findPlayerByTelegramIdNumeric(telegramIdNumber) {
+async function findPlayerByTelegramId(telegramIdNumber) {
   const c = cfg();
-  const tableUrl = airtablePlayersTableUrl();
-
-  // Telegram ID field is NUMBER in your schema
-  const formula = `{${c.FIELD_TELEGRAM_ID}} = ${telegramIdNumber}`;
-
   const params = new URLSearchParams();
   params.set('maxRecords', '1');
-  params.set('filterByFormula', formula); // :contentReference[oaicite:8]{index=8}
-
-  const url = `${tableUrl}?${params.toString()}`;
+  params.set(
+    'filterByFormula',
+    `{${c.FIELD_TELEGRAM_ID}} = ${telegramIdNumber}`
+  ); // :contentReference[oaicite:6]{index=6}
+  const url = `${airtablePlayersUrl()}?${params.toString()}`;
   const data = await airtableRequest('GET', url);
   return data?.records?.[0] || null;
 }
 
 async function createPlayer(fields) {
-  const tableUrl = airtablePlayersTableUrl();
-  // Create records format :contentReference[oaicite:9]{index=9}
-  const body = { records: [{ fields }] };
-  const data = await airtableRequest('POST', tableUrl, body);
+  const data = await airtableRequest('POST', airtablePlayersUrl(), {
+    records: [{ fields }],
+  }); // create records :contentReference[oaicite:7]{index=7}
   return data?.records?.[0] || null;
 }
 
 async function updatePlayer(recordId, fields) {
-  const tableUrl = airtablePlayersTableUrl();
-  const body = { records: [{ id: recordId, fields }] };
-  const data = await airtableRequest('PATCH', tableUrl, body);
+  const data = await airtableRequest('PATCH', airtablePlayersUrl(), {
+    records: [{ id: recordId, fields }],
+  });
   return data?.records?.[0] || null;
 }
 
-async function listPlayersSortedByRatingDesc() {
+async function listPlayersByRating() {
   const c = cfg();
-  const tableUrl = airtablePlayersTableUrl();
-
   const records = [];
   let offset = null;
 
-  // sort[0][field] / sort[0][direction] :contentReference[oaicite:10]{index=10}
   do {
     const params = new URLSearchParams();
     params.set('pageSize', '100');
     params.set('sort[0][field]', c.FIELD_INDIVIDUAL_RATING);
-    params.set('sort[0][direction]', 'desc');
+    params.set('sort[0][direction]', 'desc'); // :contentReference[oaicite:8]{index=8}
     if (offset) params.set('offset', offset);
 
-    const url = `${tableUrl}?${params.toString()}`;
+    const url = `${airtablePlayersUrl()}?${params.toString()}`;
     const data = await airtableRequest('GET', url);
-
     if (Array.isArray(data?.records)) records.push(...data.records);
     offset = data?.offset || null;
   } while (offset);
@@ -221,14 +200,13 @@ async function listPlayersSortedByRatingDesc() {
   return records;
 }
 
-// ---------------- API ----------------
+// ---- API ----
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.post('/api/me', async (req, res) => {
   try {
     if (!requireEnvForAirtable(res)) return;
-
     const initData = getInitDataFromReq(req);
     const data = validateTelegramInitDataOrThrow(initData);
 
@@ -239,13 +217,13 @@ app.post('/api/me', async (req, res) => {
         .json({ ok: false, error: 'Telegram user is missing' });
 
     const telegramId = Number(user.id);
-    const existing = await findPlayerByTelegramIdNumeric(telegramId);
+    const existing = await findPlayerByTelegramId(telegramId);
 
     res.json({
       ok: true,
       user,
       joined: Boolean(existing),
-      player: existing ? normalizePlayerRecord(existing) : null,
+      player: existing ? normalizePlayer(existing) : null,
     });
   } catch (e) {
     res
@@ -257,7 +235,6 @@ app.post('/api/me', async (req, res) => {
 app.post('/api/join', async (req, res) => {
   try {
     if (!requireEnvForAirtable(res)) return;
-
     const initData = getInitDataFromReq(req);
     const data = validateTelegramInitDataOrThrow(initData);
 
@@ -269,27 +246,25 @@ app.post('/api/join', async (req, res) => {
 
     const c = cfg();
     const telegramId = Number(user.id);
-    const name = buildDisplayNameFromTelegramUser(user);
+    const name = displayNameFromTg(user);
     const username = user.username || '';
 
-    const existing = await findPlayerByTelegramIdNumeric(telegramId);
+    const existing = await findPlayerByTelegramId(telegramId);
 
     if (existing) {
-      // Update identity fields, keep existing rating/wins/etc
-      const fieldsToUpdate = {
+      // обновляем только идентификационные поля, не трогаем рейтинг/статистику
+      const saved = await updatePlayer(existing.id, {
         [c.FIELD_NAME]: name,
         [c.FIELD_TELEGRAM_USERNAME]: username,
         [c.FIELD_LAST_UPDATED]: new Date().toISOString(),
-      };
-      const saved = await updatePlayer(existing.id, fieldsToUpdate);
+      });
       return res.json({
         ok: true,
-        player: saved ? normalizePlayerRecord(saved) : null,
+        player: saved ? normalizePlayer(saved) : null,
       });
     }
 
-    // Create new player
-    const fieldsToCreate = {
+    const created = await createPlayer({
       [c.FIELD_NAME]: name,
       [c.FIELD_TELEGRAM_ID]: telegramId,
       [c.FIELD_TELEGRAM_USERNAME]: username,
@@ -298,12 +273,11 @@ app.post('/api/join', async (req, res) => {
       [c.FIELD_WINS]: 0,
       [c.FIELD_LOSSES]: 0,
       [c.FIELD_LAST_UPDATED]: new Date().toISOString(),
-    };
+    });
 
-    const created = await createPlayer(fieldsToCreate);
     return res.json({
       ok: true,
-      player: created ? normalizePlayerRecord(created) : null,
+      player: created ? normalizePlayer(created) : null,
     });
   } catch (e) {
     res
@@ -315,12 +289,11 @@ app.post('/api/join', async (req, res) => {
 app.post('/api/players', async (req, res) => {
   try {
     if (!requireEnvForAirtable(res)) return;
-
     const initData = getInitDataFromReq(req);
     validateTelegramInitDataOrThrow(initData);
 
-    const records = await listPlayersSortedByRatingDesc();
-    res.json({ ok: true, players: records.map(normalizePlayerRecord) });
+    const records = await listPlayersByRating();
+    res.json({ ok: true, players: records.map(normalizePlayer) });
   } catch (e) {
     res
       .status(e.status || 500)
@@ -328,16 +301,14 @@ app.post('/api/players', async (req, res) => {
   }
 });
 
-// ---------------- Frontend serving ----------------
-
+// ---- Frontend serving ----
 const distPath = path.join(__dirname, 'web', 'dist');
 app.use(express.static(distPath));
 
-// Express v5 wildcard must be named (no app.get("*")) :contentReference[oaicite:11]{index=11}
+// Express v5: нельзя app.get("*"), нужен именованный catch-all :contentReference[oaicite:9]{index=9}
 app.get('/*splat', (req, res) => {
-  if (req.path.startsWith('/api')) {
+  if (req.path.startsWith('/api'))
     return res.status(404).json({ ok: false, error: 'Not found' });
-  }
   return res.sendFile(path.join(distPath, 'index.html'));
 });
 
