@@ -53,12 +53,11 @@ function cfg() {
 
     // SetScores
     S_MATCH: 'Match',
-    S_SET_NO: 'Set N°',
+    S_SET_NO: 'Set N°', // будет резолвиться в field ID (и по алиасам), так что название больше не критично
     S_P1: 'Pair 1 Score',
     S_P2: 'Pair 2 Score',
     S_WINNER_PAIR: 'Winner Pair',
 
-    // Status values
     STATUS_PENDING: 'PENDING_CONFIRMATION',
     STATUS_CONFIRMED: 'CONFIRMED',
     STATUS_DISPUTED: 'DISPUTED',
@@ -100,11 +99,11 @@ function airtableHeaders() {
   };
 }
 
-function tableUrl(tableName) {
+function tableUrl(tableNameOrId) {
   const c = cfg();
   return `${AIRTABLE_API}/${encodeURIComponent(
     c.AIRTABLE_BASE_ID
-  )}/${encodeURIComponent(tableName)}`;
+  )}/${encodeURIComponent(tableNameOrId)}`;
 }
 
 async function airtableRequest(method, url, body) {
@@ -151,7 +150,130 @@ async function airtableRequest(method, url, body) {
   }
 }
 
-// Airtable list/sort/filter docs: filterByFormula, sort[...] :contentReference[oaicite:1]{index=1}
+/**
+ * ---- Airtable schema cache (Metadata API) ----
+ * GET https://api.airtable.com/v0/meta/bases/{baseId}/tables :contentReference[oaicite:5]{index=5}
+ *
+ * Мы используем field IDs в запросах (Airtable принимает field name или field id) :contentReference[oaicite:6]{index=6}
+ */
+let schemaCachePromise = null;
+
+function norm(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[º°]/g, '°') // unify
+    .replace(/№/g, 'n')
+    .replace(/[^\p{L}\p{N} °]/gu, '');
+}
+
+function fieldAliasesFor(tableKey, fieldName) {
+  const c = cfg();
+  // Алиасы нужны только там, где у людей обычно “красивые символы”
+  if (tableKey === c.T_SETSCORES && fieldName === c.S_SET_NO) {
+    return [
+      'Set Nº',
+      'Set No',
+      'Set №',
+      'Set N',
+      'Set',
+      'Set #',
+      'Set Num',
+      'Set Number',
+    ];
+  }
+  return [];
+}
+
+async function getBaseSchema() {
+  const c = cfg();
+  if (!schemaCachePromise) {
+    schemaCachePromise = (async () => {
+      const url = `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+        c.AIRTABLE_BASE_ID
+      )}/tables`;
+      const data = await airtableRequest('GET', url);
+
+      const tables = Array.isArray(data?.tables) ? data.tables : [];
+      const byName = {};
+      const byId = {};
+
+      for (const t of tables) {
+        const tableId = t.id;
+        const tableName = t.name;
+        const fields = Array.isArray(t.fields) ? t.fields : [];
+
+        const fieldsByName = {};
+        const fieldsById = {};
+        const fieldsByNormName = {};
+
+        for (const f of fields) {
+          fieldsByName[f.name] = f;
+          fieldsById[f.id] = f;
+          fieldsByNormName[norm(f.name)] = f;
+        }
+
+        const tableObj = {
+          id: tableId,
+          name: tableName,
+          fieldsByName,
+          fieldsById,
+          fieldsByNormName,
+        };
+        byName[tableName] = tableObj;
+        byId[tableId] = tableObj;
+      }
+
+      return { byName, byId };
+    })().catch(e => {
+      console.error(
+        'Schema load failed (check schema.bases:read scope):',
+        e?.message || e
+      );
+      return null;
+    });
+  }
+  return schemaCachePromise;
+}
+
+async function resolveFieldKey(tableKey, fieldName) {
+  const schema = await getBaseSchema();
+  if (!schema) return fieldName;
+
+  const table = schema.byName[tableKey] || schema.byId[tableKey];
+  if (!table) return fieldName;
+
+  // exact
+  if (table.fieldsByName[fieldName]) return table.fieldsByName[fieldName].id;
+
+  // aliases exact
+  for (const a of fieldAliasesFor(tableKey, fieldName)) {
+    if (table.fieldsByName[a]) return table.fieldsByName[a].id;
+  }
+
+  // normalized match
+  const n = norm(fieldName);
+  if (table.fieldsByNormName[n]) return table.fieldsByNormName[n].id;
+
+  for (const a of fieldAliasesFor(tableKey, fieldName)) {
+    const na = norm(a);
+    if (table.fieldsByNormName[na]) return table.fieldsByNormName[na].id;
+  }
+
+  // fallback
+  return fieldName;
+}
+
+async function mapFields(tableKey, fieldsObj) {
+  const out = {};
+  for (const [k, v] of Object.entries(fieldsObj || {})) {
+    const key = await resolveFieldKey(tableKey, k);
+    out[key] = v;
+  }
+  return out;
+}
+
 async function listAll(tableName, paramsObj = {}) {
   const records = [];
   let offset = null;
@@ -182,18 +304,30 @@ async function listAll(tableName, paramsObj = {}) {
   return records;
 }
 
-// Get record endpoint exists in Airtable API :contentReference[oaicite:2]{index=2}
 async function getRecord(tableName, recordId) {
   return airtableRequest('GET', `${tableUrl(tableName)}/${recordId}`);
 }
 
 async function createRecords(tableName, records) {
-  // Linked fields must be arrays of record IDs :contentReference[oaicite:3]{index=3}
-  return airtableRequest('POST', tableUrl(tableName), { records });
+  const mapped = [];
+  for (const r of records) {
+    mapped.push({ ...r, fields: await mapFields(tableName, r.fields) });
+  }
+  return airtableRequest('POST', tableUrl(tableName), {
+    records: mapped,
+    typecast: true,
+  });
 }
 
 async function updateRecords(tableName, records) {
-  return airtableRequest('PATCH', tableUrl(tableName), { records });
+  const mapped = [];
+  for (const r of records) {
+    mapped.push({ ...r, fields: await mapFields(tableName, r.fields) });
+  }
+  return airtableRequest('PATCH', tableUrl(tableName), {
+    records: mapped,
+    typecast: true,
+  });
 }
 
 function getInitDataFromReq(req) {
@@ -207,7 +341,6 @@ function validateTelegramInitDataOrThrow(initData) {
     err.status = 400;
     throw err;
   }
-  // initData must be validated server-side :contentReference[oaicite:4]{index=4}
   if (!isValid(initData, c.BOT_TOKEN)) {
     const err = new Error('Invalid initData');
     err.status = 401;
@@ -300,10 +433,7 @@ function eloDelta(rA, rB, scoreA, k) {
   return k * (scoreA - expectedA);
 }
 
-// Padel set results validation based on official FIP scoring section:
-// - win set: first to 6 with 2 games advantage
-// - at 5-5 play to 7-5
-// - at 6-6 tie-break => 7-6 :contentReference[oaicite:5]{index=5}
+// Padel set scoring rules (incl 7-6 tie-break)
 function validateSetGames(a, b, setIndex1Based) {
   const p1 = Number(a);
   const p2 = Number(b);
@@ -318,7 +448,7 @@ function validateSetGames(a, b, setIndex1Based) {
   const ok = (w === 6 && l <= 4) || (w === 7 && (l === 5 || l === 6));
   if (!ok) {
     throw new Error(
-      `Invalid padel set score ${p1}-${p2} at set ${setIndex1Based}. Allowed examples: 6-0..6-4, 7-5, 7-6.`
+      `Invalid padel set score ${p1}-${p2} at set ${setIndex1Based}. Allowed: 6-0..6-4, 7-5, 7-6.`
     );
   }
   return { p1, p2 };
@@ -386,12 +516,17 @@ async function findOrCreatePair(playerAId, playerBId, playersById) {
 }
 
 function uniq(arr) {
-  return [...new Set(arr.filter(Boolean))];
+  return [...new Set((arr || []).filter(Boolean))];
 }
 
 function containsAll(haystackIds, needIds) {
   const set = new Set(haystackIds || []);
   return needIds.every(id => set.has(id));
+}
+
+function setIntersection(a, b) {
+  const s = new Set(a);
+  return b.some(x => s.has(x));
 }
 
 async function applyRatingsForMatch(matchRec, setScoresForMatch) {
@@ -405,7 +540,6 @@ async function applyRatingsForMatch(matchRec, setScoresForMatch) {
   const pairsById = {};
   const playersById = {};
 
-  // load all pairs + players (small scale MVP)
   const players = await listAll(c.T_PLAYERS, { maxRecords: 1000 });
   players.forEach(r => (playersById[r.id] = normalizePlayer(r)));
 
@@ -425,7 +559,6 @@ async function applyRatingsForMatch(matchRec, setScoresForMatch) {
     .map(normalizeSetScore)
     .sort((a, b) => a.setNo - b.setNo);
 
-  // winner by set count
   const setWins = ss.reduce(
     (acc, s) => {
       if (s.p1 > s.p2) acc.p1++;
@@ -438,12 +571,10 @@ async function applyRatingsForMatch(matchRec, setScoresForMatch) {
   const pair1Won = setWins.p1 > setWins.p2;
   const scoreA = pair1Won ? 1 : 0;
 
-  // Pair Elo
   const deltaPair = eloDelta(p1.rating, p2.rating, scoreA, c.ELO_K_PAIR);
   const newP1Rating = Math.round(p1.rating + deltaPair);
   const newP2Rating = Math.round(p2.rating - deltaPair);
 
-  // Player Elo: use average team rating and apply same delta to both players (MVP)
   const p1Avg = Math.round(
     (playersById[p1Players[0]].rating + playersById[p1Players[1]].rating) / 2
   );
@@ -764,7 +895,10 @@ app.post('/api/matches', async (req, res) => {
   }
 });
 
-// REPORT: creates match + sets; status = PENDING_CONFIRMATION; NO rating update yet
+/**
+ * REPORT (NEW FLOW):
+ * body: { myPairId, oppPairId, sets:[{p1,p2}...], date?, time? }
+ */
 app.post('/api/matches/report', async (req, res) => {
   try {
     if (!requireEnv(res)) return;
@@ -777,27 +911,18 @@ app.post('/api/matches/report', async (req, res) => {
         .json({ ok: false, error: 'You must Join before reporting matches' });
 
     const body = req.body || {};
-    const partnerId = body.partnerId;
-    const opp1Id = body.opp1Id;
-    const opp2Id = body.opp2Id;
+    const myPairId = body.myPairId;
+    const oppPairId = body.oppPairId;
     const sets = Array.isArray(body.sets) ? body.sets : [];
 
-    if (!partnerId || !opp1Id || !opp2Id)
+    if (!myPairId || !oppPairId)
       return res
         .status(400)
-        .json({ ok: false, error: 'partnerId, opp1Id, opp2Id are required' });
-
-    if (partnerId === existing.id)
+        .json({ ok: false, error: 'myPairId and oppPairId are required' });
+    if (myPairId === oppPairId)
       return res
         .status(400)
-        .json({ ok: false, error: 'Partner cannot be yourself' });
-    if (opp1Id === opp2Id)
-      return res
-        .status(400)
-        .json({
-          ok: false,
-          error: 'Opponent pair cannot have the same player twice',
-        });
+        .json({ ok: false, error: 'Opponent pair must be different' });
 
     if (sets.length < 2 || sets.length > 3)
       return res.status(400).json({ ok: false, error: 'Provide 2 or 3 sets' });
@@ -807,7 +932,6 @@ app.post('/api/matches/report', async (req, res) => {
       return { setNo: i + 1, p1, p2 };
     });
 
-    // require 3rd set only if first two are 1-1; and forbid 3rd if already 2-0
     const first2 = parsedSets.slice(0, 2).reduce(
       (acc, s) => {
         if (s.p1 > s.p2) acc.p1++;
@@ -830,31 +954,41 @@ app.post('/api/matches/report', async (req, res) => {
         });
     }
 
-    // Load players map and find/create pairs
-    const players = await listAll(c.T_PLAYERS, { maxRecords: 1000 });
-    const playersById = Object.fromEntries(
-      players.map(r => [r.id, normalizePlayer(r)])
-    );
+    // validate pairs and "no same player in both pairs"
+    const myPairRec = await getRecord(c.T_PAIRS, myPairId);
+    const oppPairRec = await getRecord(c.T_PAIRS, oppPairId);
+    const myPair = normalizePair(myPairRec);
+    const oppPair = normalizePair(oppPairRec);
 
-    const myPlayerId = existing.id;
-    const { pairRec: myPairRec } = await findOrCreatePair(
-      myPlayerId,
-      partnerId,
-      playersById
-    );
-    const { pairRec: oppPairRec } = await findOrCreatePair(
-      opp1Id,
-      opp2Id,
-      playersById
-    );
+    const myPlayers = [myPair.player1, myPair.player2].filter(Boolean);
+    const oppPlayers = [oppPair.player1, oppPair.player2].filter(Boolean);
 
-    const myPairId = myPairRec.id;
-    const oppPairId = oppPairRec.id;
+    if (myPlayers.length !== 2 || oppPlayers.length !== 2) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Both pairs must have exactly 2 players' });
+    }
+
+    // reporter must be in myPair
+    if (!myPlayers.includes(existing.id)) {
+      return res
+        .status(403)
+        .json({
+          ok: false,
+          error: 'You can only report match for a pair you belong to',
+        });
+    }
+
+    if (setIntersection(myPlayers, oppPlayers)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Same player cannot appear in both pairs' });
+    }
 
     const dateISO = body.date || new Date().toISOString().slice(0, 10);
     const scoreText = parsedSets.map(s => `${s.p1}-${s.p2}`).join(' ');
 
-    // Create match with PENDING_CONFIRMATION
+    // Create match (PENDING_CONFIRMATION)
     const matchCreate = await createRecords(c.T_MATCHES, [
       {
         fields: {
@@ -862,7 +996,7 @@ app.post('/api/matches/report', async (req, res) => {
           [c.M_TIME]: body.time || '',
           [c.M_PAIR1]: [myPairId],
           [c.M_PAIR2]: [oppPairId],
-          [c.M_INITIATED_BY]: [myPlayerId],
+          [c.M_INITIATED_BY]: [existing.id],
           [c.M_SCORE]: scoreText,
           [c.M_STATUS]: c.STATUS_PENDING,
         },
@@ -903,8 +1037,7 @@ app.post('/api/matches/report', async (req, res) => {
   }
 });
 
-// CONFIRM: only opponent pair players can confirm.
-// When BOTH opponents confirmed => status CONFIRMED + apply ratings.
+// CONFIRM / DISPUTE / REJECT остаются как были
 app.post('/api/matches/confirm', async (req, res) => {
   try {
     if (!requireEnv(res)) return;
@@ -939,7 +1072,6 @@ app.post('/api/matches/confirm', async (req, res) => {
         .status(500)
         .json({ ok: false, error: 'Match missing opponent pair' });
 
-    // Opponent pair is Pair 2 (by design)
     const oppPairRec = await getRecord(c.T_PAIRS, m.pair2);
     const oppPair = normalizePair(oppPairRec);
     const opponentPlayerIds = uniq([oppPair.player1, oppPair.player2]);
@@ -956,7 +1088,6 @@ app.post('/api/matches/confirm', async (req, res) => {
     const currentConfirmed = uniq(m.confirmedBy);
     const nextConfirmed = uniq([...currentConfirmed, existing.id]);
 
-    // Update confirmed list (linked record = array of record IDs) :contentReference[oaicite:6]{index=6}
     await updateRecords(c.T_MATCHES, [
       {
         id: matchId,
@@ -978,7 +1109,6 @@ app.post('/api/matches/confirm', async (req, res) => {
       });
     }
 
-    // Both opponents confirmed: set status CONFIRMED and apply ratings once
     await updateRecords(c.T_MATCHES, [
       {
         id: matchId,
@@ -989,7 +1119,6 @@ app.post('/api/matches/confirm', async (req, res) => {
       },
     ]);
 
-    // Load sets for match (simple MVP: list and filter)
     const allSets = await listAll(c.T_SETSCORES, { maxRecords: 2000 });
     const setsForMatch = allSets.filter(
       r => normalizeSetScore(r).match === matchId
