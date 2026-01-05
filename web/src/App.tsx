@@ -35,14 +35,16 @@ type Match = {
   pair1: string | null;
   pair2: string | null;
   initiatedBy: string | null;
-  confirmedBy: string | null;
+  confirmedBy: string[];
   score: string;
+  disputeReason: string;
+
   pair1Obj?: Pair | null;
   pair2Obj?: Pair | null;
   setScores?: SetScore[];
-};
 
-type ApiFail = { ok: false; error: string; details?: any; status?: number; raw?: string };
+  opponentPlayerIds?: string[];
+};
 
 function getTg() {
   return (window as any).Telegram?.WebApp;
@@ -56,7 +58,7 @@ function meName(u: TgUser | null) {
   return `User ${u.id}`;
 }
 
-async function fetchJsonWithTimeout(url: string, options: RequestInit, timeoutMs = 15000) {
+async function fetchJsonWithTimeout(url: string, options: RequestInit, timeoutMs = 20000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -93,20 +95,27 @@ export default function App() {
   const [pairs, setPairs] = useState<Pair[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
 
-  // Forms
+  // Filter
+  const [matchFilterPlayerId, setMatchFilterPlayerId] = useState<string>("");
+
+  // Create pair form
   const [pairP1, setPairP1] = useState<string>("");
   const [pairP2, setPairP2] = useState<string>("");
 
+  // Report match form
   const [partnerId, setPartnerId] = useState<string>("");
   const [opp1Id, setOpp1Id] = useState<string>("");
   const [opp2Id, setOpp2Id] = useState<string>("");
+
   const [s1a, setS1a] = useState<string>("6");
   const [s1b, setS1b] = useState<string>("4");
   const [s2a, setS2a] = useState<string>("4");
   const [s2b, setS2b] = useState<string>("6");
   const [useS3, setUseS3] = useState<boolean>(false);
-  const [s3a, setS3a] = useState<string>("10");
-  const [s3b, setS3b] = useState<string>("8");
+  const [s3a, setS3a] = useState<string>("7");
+  const [s3b, setS3b] = useState<string>("5");
+
+  const [disputeReason, setDisputeReason] = useState<string>("");
 
   const [raw, setRaw] = useState<any>(null);
 
@@ -119,7 +128,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, initData })
       },
-      20000
+      25000
     );
   }
 
@@ -186,6 +195,7 @@ export default function App() {
       }
 
       setUser(json.user);
+
       if (!json.joined) {
         setScreen("join");
         setStatus("Not joined yet");
@@ -193,6 +203,7 @@ export default function App() {
       }
 
       setMePlayer(json.player || null);
+      setMatchFilterPlayerId(json.player?.id || "");
       setScreen("app");
       setStatus("OK");
       await refreshAll();
@@ -215,6 +226,7 @@ export default function App() {
       }
 
       setMePlayer(json.player || null);
+      setMatchFilterPlayerId(json.player?.id || "");
       setScreen("app");
       await refreshAll();
     } finally {
@@ -277,7 +289,7 @@ export default function App() {
     if (useS3) sets.push({ p1: Number(s3a), p2: Number(s3b) });
 
     setBusy(true);
-    setStatus("Reporting match…");
+    setStatus("Creating match (pending confirmation)…");
     try {
       const json = await apiPost("/api/matches/report", {
         partnerId,
@@ -293,7 +305,66 @@ export default function App() {
         return;
       }
 
-      setStatus(`Match saved. Winner: ${json.winner}. ΔPair=${json.ratingDeltaPair}, ΔPlayer=${json.ratingDeltaPlayer}`);
+      setStatus("Match created. Waiting for BOTH opponents to confirm.");
+      await loadMatches();
+      setTab("matches");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmMatch(matchId: string) {
+    setBusy(true);
+    setStatus("Confirming…");
+    try {
+      const json = await apiPost("/api/matches/confirm", { matchId });
+      setRaw(json);
+      if (!json.ok) {
+        setStatus(`Confirm failed: ${json.error}`);
+        setScreen("error");
+        return;
+      }
+      setStatus(json.message || "OK");
+      await refreshAll();
+      setTab("matches");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disputeMatch(matchId: string) {
+    setBusy(true);
+    setStatus("Marking as disputed…");
+    try {
+      const json = await apiPost("/api/matches/dispute", { matchId, reason: disputeReason });
+      setRaw(json);
+      if (!json.ok) {
+        setStatus(`Dispute failed: ${json.error}`);
+        setScreen("error");
+        return;
+      }
+      setStatus(json.message || "OK");
+      setDisputeReason("");
+      await refreshAll();
+      setTab("matches");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rejectMatch(matchId: string) {
+    setBusy(true);
+    setStatus("Rejecting…");
+    try {
+      const json = await apiPost("/api/matches/reject", { matchId, reason: disputeReason });
+      setRaw(json);
+      if (!json.ok) {
+        setStatus(`Reject failed: ${json.error}`);
+        setScreen("error");
+        return;
+      }
+      setStatus(json.message || "OK");
+      setDisputeReason("");
       await refreshAll();
       setTab("matches");
     } finally {
@@ -335,6 +406,16 @@ export default function App() {
     </button>
   );
 
+  const filteredMatches = matches.filter((m) => {
+    const pid = matchFilterPlayerId;
+    if (!pid) return true;
+    const p1a = m.pair1Obj?.player1;
+    const p1b = m.pair1Obj?.player2;
+    const p2a = m.pair2Obj?.player1;
+    const p2b = m.pair2Obj?.player2;
+    return [p1a, p1b, p2a, p2b].includes(pid);
+  });
+
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, lineHeight: 1.4, maxWidth: 900 }}>
       <h2 style={{ margin: "0 0 6px" }}>Padel League</h2>
@@ -351,14 +432,7 @@ export default function App() {
         <button
           onClick={joinLeague}
           disabled={busy}
-          style={{
-            padding: "12px 14px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            background: "white",
-            fontWeight: 800,
-            cursor: busy ? "not-allowed" : "pointer"
-          }}
+          style={{ padding: "12px 14px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
         >
           Join Padel League
         </button>
@@ -376,11 +450,7 @@ export default function App() {
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <h3 style={{ margin: "0 0 10px" }}>Players</h3>
-                <button
-                  onClick={refreshAll}
-                  disabled={busy}
-                  style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white" }}
-                >
+                <button onClick={refreshAll} disabled={busy} style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white" }}>
                   Refresh
                 </button>
               </div>
@@ -465,11 +535,7 @@ export default function App() {
                     {playerOptions}
                   </select>
                 </label>
-                <button
-                  onClick={createPair}
-                  disabled={busy}
-                  style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
-                >
+                <button onClick={createPair} disabled={busy} style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}>
                   Create
                 </button>
               </div>
@@ -478,40 +544,104 @@ export default function App() {
 
           {tab === "matches" && (
             <div>
-              <h3 style={{ margin: "0 0 10px" }}>Matches</h3>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <h3 style={{ margin: "0 0 10px" }}>Matches</h3>
+                <button onClick={refreshAll} disabled={busy} style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white" }}>
+                  Refresh
+                </button>
+              </div>
+
+              <label style={{ display: "block", marginBottom: 10 }}>
+                Show matches for player
+                <select value={matchFilterPlayerId} onChange={(e) => setMatchFilterPlayerId(e.target.value)} style={{ width: "100%", padding: 8, marginTop: 4, maxWidth: 520 }}>
+                  <option value="">— all —</option>
+                  {players.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
               <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, overflow: "hidden", marginBottom: 14 }}>
-                {matches.map((m, idx) => {
+                {filteredMatches.map((m, idx) => {
                   const p1a = m.pair1Obj?.player1Obj?.name || "—";
                   const p1b = m.pair1Obj?.player2Obj?.name || "—";
                   const p2a = m.pair2Obj?.player1Obj?.name || "—";
                   const p2b = m.pair2Obj?.player2Obj?.name || "—";
+
+                  const meId = mePlayer?.id || "";
+                  const isOpponent = (m.opponentPlayerIds || []).includes(meId);
+                  const alreadyConfirmed = (m.confirmedBy || []).includes(meId);
+                  const pending = m.status === "PENDING_CONFIRMATION";
+                  const canAct = pending && isOpponent;
+
+                  const confirmedCount = (m.confirmedBy || []).filter((x) => (m.opponentPlayerIds || []).includes(x)).length;
+                  const needCount = (m.opponentPlayerIds || []).length || 2;
+
                   const dateStr = typeof m.date === "string" ? m.date : m.date?.toString?.() || "";
+
                   return (
-                    <div
-                      key={m.id}
-                      style={{
-                        padding: "10px 12px",
-                        borderTop: idx === 0 ? "none" : "1px solid #eee",
-                        background: "white"
-                      }}
-                    >
+                    <div key={m.id} style={{ padding: "10px 12px", borderTop: idx === 0 ? "none" : "1px solid #eee", background: "white" }}>
                       <div style={{ fontWeight: 900 }}>
-                        {dateStr} {m.time ? `| ${m.time}` : ""} {m.status ? `| ${m.status}` : ""}
+                        {dateStr} {m.time ? `| ${m.time}` : ""} | {m.status || "—"}
                       </div>
                       <div style={{ marginTop: 4 }}>
                         <b>{p1a}</b> + <b>{p1b}</b> vs <b>{p2a}</b> + <b>{p2b}</b>
                       </div>
                       <div style={{ opacity: 0.75, marginTop: 2 }}>Score: {m.score || "—"}</div>
+
+                      {m.disputeReason ? <div style={{ marginTop: 6, color: "#7a0000" }}>Reason: {m.disputeReason}</div> : null}
+
+                      {pending ? (
+                        <div style={{ marginTop: 6, opacity: 0.8 }}>
+                          Opponent confirmations: {confirmedCount}/{needCount}
+                        </div>
+                      ) : null}
+
+                      {canAct ? (
+                        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            disabled={busy || alreadyConfirmed}
+                            onClick={() => confirmMatch(m.id)}
+                            style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
+                          >
+                            {alreadyConfirmed ? "Confirmed" : "Confirm"}
+                          </button>
+
+                          <input
+                            value={disputeReason}
+                            onChange={(e) => setDisputeReason(e.target.value)}
+                            placeholder="Reason (optional)"
+                            style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", minWidth: 220 }}
+                          />
+
+                          <button
+                            disabled={busy}
+                            onClick={() => disputeMatch(m.id)}
+                            style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
+                          >
+                            Dispute
+                          </button>
+
+                          <button
+                            disabled={busy}
+                            onClick={() => rejectMatch(m.id)}
+                            style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
               </div>
 
-              <h4 style={{ margin: "0 0 8px" }}>Report match result</h4>
+              <h4 style={{ margin: "0 0 8px" }}>Report match result (creates PENDING_CONFIRMATION)</h4>
               <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
                 <label>
-                  Your partner (you are fixed)
+                  Your partner (pair will be reused/created)
                   <select value={partnerId} onChange={(e) => setPartnerId(e.target.value)} style={{ width: "100%", padding: 8, marginTop: 4 }}>
                     {playerOptions}
                   </select>
@@ -553,7 +683,7 @@ export default function App() {
 
                 <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
                   <input type="checkbox" checked={useS3} onChange={(e) => setUseS3(e.target.checked)} />
-                  Add 3rd set
+                  Add 3rd set (only if 1-1)
                 </label>
 
                 {useS3 && (
@@ -569,12 +699,8 @@ export default function App() {
                   </div>
                 )}
 
-                <button
-                  onClick={reportMatch}
-                  disabled={busy}
-                  style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
-                >
-                  Save match + update ratings
+                <button onClick={reportMatch} disabled={busy} style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}>
+                  Create match (pending)
                 </button>
               </div>
             </div>
@@ -583,20 +709,14 @@ export default function App() {
       )}
 
       {screen === "error" && (
-        <button
-          disabled={busy}
-          onClick={checkMe}
-          style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}
-        >
+        <button disabled={busy} onClick={checkMe} style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc", background: "white", fontWeight: 800 }}>
           Retry
         </button>
       )}
 
       <details style={{ marginTop: 14, opacity: 0.9 }}>
         <summary style={{ cursor: "pointer" }}>Debug</summary>
-        <pre style={{ background: "#f6f6f6", padding: 12, borderRadius: 8, overflowX: "auto" }}>
-          {JSON.stringify(raw, null, 2)}
-        </pre>
+        <pre style={{ background: "#f6f6f6", padding: 12, borderRadius: 8, overflowX: "auto" }}>{JSON.stringify(raw, null, 2)}</pre>
       </details>
     </div>
   );
