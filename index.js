@@ -53,7 +53,7 @@ function cfg() {
 
     // SetScores
     S_MATCH: 'Match',
-    S_SET_NO: 'Set N°', // будет резолвиться в field ID (и по алиасам), так что название больше не критично
+    S_SET_NO: 'Set N°',
     S_P1: 'Pair 1 Score',
     S_P2: 'Pair 2 Score',
     S_WINNER_PAIR: 'Winner Pair',
@@ -152,9 +152,7 @@ async function airtableRequest(method, url, body) {
 
 /**
  * ---- Airtable schema cache (Metadata API) ----
- * GET https://api.airtable.com/v0/meta/bases/{baseId}/tables :contentReference[oaicite:5]{index=5}
- *
- * Мы используем field IDs в запросах (Airtable принимает field name или field id) :contentReference[oaicite:6]{index=6}
+ * Uses field IDs for writes to avoid name mismatch.
  */
 let schemaCachePromise = null;
 
@@ -163,14 +161,13 @@ function norm(s) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ')
-    .replace(/[º°]/g, '°') // unify
+    .replace(/[º°]/g, '°')
     .replace(/№/g, 'n')
     .replace(/[^\p{L}\p{N} °]/gu, '');
 }
 
 function fieldAliasesFor(tableKey, fieldName) {
   const c = cfg();
-  // Алиасы нужны только там, где у людей обычно “красивые символы”
   if (tableKey === c.T_SETSCORES && fieldName === c.S_SET_NO) {
     return [
       'Set Nº',
@@ -244,15 +241,12 @@ async function resolveFieldKey(tableKey, fieldName) {
   const table = schema.byName[tableKey] || schema.byId[tableKey];
   if (!table) return fieldName;
 
-  // exact
   if (table.fieldsByName[fieldName]) return table.fieldsByName[fieldName].id;
 
-  // aliases exact
   for (const a of fieldAliasesFor(tableKey, fieldName)) {
     if (table.fieldsByName[a]) return table.fieldsByName[a].id;
   }
 
-  // normalized match
   const n = norm(fieldName);
   if (table.fieldsByNormName[n]) return table.fieldsByNormName[n].id;
 
@@ -261,7 +255,6 @@ async function resolveFieldKey(tableKey, fieldName) {
     if (table.fieldsByNormName[na]) return table.fieldsByNormName[na].id;
   }
 
-  // fallback
   return fieldName;
 }
 
@@ -433,7 +426,6 @@ function eloDelta(rA, rB, scoreA, k) {
   return k * (scoreA - expectedA);
 }
 
-// Padel set scoring rules (incl 7-6 tie-break)
 function validateSetGames(a, b, setIndex1Based) {
   const p1 = Number(a);
   const p2 = Number(b);
@@ -517,11 +509,6 @@ async function findOrCreatePair(playerAId, playerBId, playersById) {
 
 function uniq(arr) {
   return [...new Set((arr || []).filter(Boolean))];
-}
-
-function containsAll(haystackIds, needIds) {
-  const set = new Set(haystackIds || []);
-  return needIds.every(id => set.has(id));
 }
 
 function setIntersection(a, b) {
@@ -895,10 +882,6 @@ app.post('/api/matches', async (req, res) => {
   }
 });
 
-/**
- * REPORT (NEW FLOW):
- * body: { myPairId, oppPairId, sets:[{p1,p2}...], date?, time? }
- */
 app.post('/api/matches/report', async (req, res) => {
   try {
     if (!requireEnv(res)) return;
@@ -954,7 +937,6 @@ app.post('/api/matches/report', async (req, res) => {
         });
     }
 
-    // validate pairs and "no same player in both pairs"
     const myPairRec = await getRecord(c.T_PAIRS, myPairId);
     const oppPairRec = await getRecord(c.T_PAIRS, oppPairId);
     const myPair = normalizePair(myPairRec);
@@ -969,7 +951,6 @@ app.post('/api/matches/report', async (req, res) => {
         .json({ ok: false, error: 'Both pairs must have exactly 2 players' });
     }
 
-    // reporter must be in myPair
     if (!myPlayers.includes(existing.id)) {
       return res
         .status(403)
@@ -988,7 +969,6 @@ app.post('/api/matches/report', async (req, res) => {
     const dateISO = body.date || new Date().toISOString().slice(0, 10);
     const scoreText = parsedSets.map(s => `${s.p1}-${s.p2}`).join(' ');
 
-    // Create match (PENDING_CONFIRMATION)
     const matchCreate = await createRecords(c.T_MATCHES, [
       {
         fields: {
@@ -1007,7 +987,6 @@ app.post('/api/matches/report', async (req, res) => {
     if (!matchRec?.id) throw new Error('Failed to create match');
     const matchId = matchRec.id;
 
-    // Create SetScores linked to match
     const setRecords = parsedSets.map(s => {
       const winnerPair = s.p1 > s.p2 ? myPairId : oppPairId;
       return {
@@ -1027,7 +1006,8 @@ app.post('/api/matches/report', async (req, res) => {
       ok: true,
       matchId,
       status: c.STATUS_PENDING,
-      message: 'Match created. Waiting for BOTH opponents to confirm.',
+      message:
+        'Match created. Waiting for opponent confirmation (one player is enough).',
     });
   } catch (e) {
     console.error('matches/report error:', e?.message, e?.details || '');
@@ -1037,20 +1017,30 @@ app.post('/api/matches/report', async (req, res) => {
   }
 });
 
-// CONFIRM / DISPUTE / REJECT остаются как были
+// --- NEW: one opponent confirmation is enough ---
+const confirmInFlight = new Set();
+
 app.post('/api/matches/confirm', async (req, res) => {
+  const c = cfg();
+  const initData = getInitDataFromReq(req);
+  const { matchId } = req.body || {};
+
   try {
     if (!requireEnv(res)) return;
-    const c = cfg();
 
-    const initData = getInitDataFromReq(req);
     const { existing } = await getOrCreatePlayerByTelegram(initData);
     if (!existing)
       return res.status(403).json({ ok: false, error: 'You must Join' });
-
-    const { matchId } = req.body || {};
     if (!matchId)
       return res.status(400).json({ ok: false, error: 'matchId is required' });
+
+    if (confirmInFlight.has(matchId)) {
+      return res.json({
+        ok: true,
+        status: 'PROCESSING',
+        message: 'Confirmation is being processed. Refresh in a moment.',
+      });
+    }
 
     const matchRec = await getRecord(c.T_MATCHES, matchId);
     const m = normalizeMatch(matchRec);
@@ -1085,55 +1075,39 @@ app.post('/api/matches/confirm', async (req, res) => {
         });
     }
 
-    const currentConfirmed = uniq(m.confirmedBy);
-    const nextConfirmed = uniq([...currentConfirmed, existing.id]);
+    confirmInFlight.add(matchId);
+    try {
+      const nextConfirmed = uniq([...(m.confirmedBy || []), existing.id]);
 
-    await updateRecords(c.T_MATCHES, [
-      {
-        id: matchId,
-        fields: {
-          [c.M_CONFIRMED_BY]: nextConfirmed,
+      // Confirm immediately (one opponent is enough)
+      await updateRecords(c.T_MATCHES, [
+        {
+          id: matchId,
+          fields: {
+            [c.M_STATUS]: c.STATUS_CONFIRMED,
+            [c.M_CONFIRMED_BY]: nextConfirmed,
+          },
         },
-      },
-    ]);
+      ]);
 
-    const nowAllConfirmed = containsAll(nextConfirmed, opponentPlayerIds);
+      const allSets = await listAll(c.T_SETSCORES, { maxRecords: 2000 });
+      const setsForMatch = allSets.filter(
+        r => normalizeSetScore(r).match === matchId
+      );
 
-    if (!nowAllConfirmed) {
+      const ratingResult = await applyRatingsForMatch(matchRec, setsForMatch);
+
       return res.json({
         ok: true,
-        status: c.STATUS_PENDING,
+        status: c.STATUS_CONFIRMED,
         confirmedBy: nextConfirmed,
-        need: opponentPlayerIds,
-        message: 'Saved your confirmation. Waiting for the second opponent.',
+        message: 'Match confirmed (one opponent). Ratings updated.',
+        ratingDeltaPair: ratingResult.deltaPair,
+        ratingDeltaPlayer: ratingResult.deltaPlayer,
       });
+    } finally {
+      confirmInFlight.delete(matchId);
     }
-
-    await updateRecords(c.T_MATCHES, [
-      {
-        id: matchId,
-        fields: {
-          [c.M_STATUS]: c.STATUS_CONFIRMED,
-          [c.M_CONFIRMED_BY]: nextConfirmed,
-        },
-      },
-    ]);
-
-    const allSets = await listAll(c.T_SETSCORES, { maxRecords: 2000 });
-    const setsForMatch = allSets.filter(
-      r => normalizeSetScore(r).match === matchId
-    );
-
-    const ratingResult = await applyRatingsForMatch(matchRec, setsForMatch);
-
-    return res.json({
-      ok: true,
-      status: c.STATUS_CONFIRMED,
-      confirmedBy: nextConfirmed,
-      message: 'Match confirmed. Ratings updated.',
-      ratingDeltaPair: ratingResult.deltaPair,
-      ratingDeltaPlayer: ratingResult.deltaPlayer,
-    });
   } catch (e) {
     console.error('matches/confirm error:', e?.message, e?.details || '');
     res
@@ -1271,6 +1245,7 @@ app.use('/api', (_req, res) =>
 const distPath = path.join(__dirname, 'web', 'dist');
 app.use(express.static(distPath));
 
+// Express 5 friendly catch-all
 app.get('/*splat', (_req, res) =>
   res.sendFile(path.join(distPath, 'index.html'))
 );
