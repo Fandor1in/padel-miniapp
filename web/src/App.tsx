@@ -23,7 +23,14 @@ type Pair = {
   player2Obj?: Player | null;
 };
 
-type SetScore = { id: string; match: string | null; setNo: number; p1: number; p2: number; winnerPair: string | null };
+type SetScore = {
+  id: string;
+  match: string | null;
+  setNo: number;
+  p1: number;
+  p2: number;
+  winnerPair: string | null;
+};
 
 type Match = {
   id: string;
@@ -43,6 +50,15 @@ type Match = {
 
   opponentPlayerIds?: string[];
 };
+
+type CreatePairFlow =
+  | null
+  | {
+      target: "my" | "opp" | "any";
+      returnTab: "matches" | "pairs";
+      lockPlayerAId?: string; // e.g. mePlayer.id for "my"
+      excludePlayerIds?: string[]; // e.g. my pair players when creating opp pair
+    };
 
 function getTg() {
   return (window as any).Telegram?.WebApp;
@@ -113,13 +129,9 @@ export default function App() {
   const [pairs, setPairs] = useState<Pair[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
 
-  // Report match flow (by pairs)
+  // Report match (now: ONLY selection + sets)
   const [myPairId, setMyPairId] = useState<string>("");
   const [oppPairId, setOppPairId] = useState<string>("");
-
-  const [myPartnerId, setMyPartnerId] = useState<string>("");
-  const [oppCreateP1, setOppCreateP1] = useState<string>("");
-  const [oppCreateP2, setOppCreateP2] = useState<string>("");
 
   // Sets
   const [s1a, setS1a] = useState<string>("6");
@@ -129,8 +141,13 @@ export default function App() {
   const [s3a, setS3a] = useState<string>("7");
   const [s3b, setS3b] = useState<string>("5");
 
-  // dispute reason (minimal: hidden behind details)
+  // dispute reason (kept minimal)
   const [reason, setReason] = useState<string>("");
+
+  // Create pair flow (button from Matches redirects here)
+  const [createFlow, setCreateFlow] = useState<CreatePairFlow>(null);
+  const [createA, setCreateA] = useState<string>("");
+  const [createB, setCreateB] = useState<string>("");
 
   async function apiPost(path: string, body: any = {}) {
     const initData = tg?.initData;
@@ -212,6 +229,7 @@ export default function App() {
 
       setMePlayer(json.player || null);
       setScreen("app");
+      setTab("league");
       setStatus("OK");
       await refreshAll();
     } finally {
@@ -231,66 +249,94 @@ export default function App() {
       }
       setMePlayer(json.player || null);
       setScreen("app");
+      setTab("league");
       await refreshAll();
     } finally {
       setBusy(false);
     }
   }
 
-  async function createMyPair() {
+  function startCreateMyPair() {
     if (!mePlayer?.id) return;
-    if (!myPartnerId) {
-      setStatus("Choose partner.");
+    setCreateFlow({ target: "my", returnTab: "matches", lockPlayerAId: mePlayer.id, excludePlayerIds: [] });
+    setCreateA(mePlayer.id);
+    setCreateB("");
+    setTab("pairs");
+    setStatus("Create your pair, then you’ll return to Matches.");
+  }
+
+  function startCreateOpponentPair() {
+    if (!selectedMyPair) {
+      setStatus("Select your pair first.");
       return;
     }
-    if (myPartnerId === mePlayer.id) {
-      setStatus("Partner cannot be you.");
+    const excluded = pairPlayers(selectedMyPair);
+    setCreateFlow({ target: "opp", returnTab: "matches", excludePlayerIds: excluded });
+    setCreateA("");
+    setCreateB("");
+    setTab("pairs");
+    setStatus("Create opponent pair, then you’ll return to Matches.");
+  }
+
+  function startCreateAnyPair() {
+    setCreateFlow({ target: "any", returnTab: "pairs", excludePlayerIds: [] });
+    setCreateA("");
+    setCreateB("");
+    setTab("pairs");
+    setStatus("Create pair.");
+  }
+
+  async function createPairSubmit() {
+    const flow = createFlow;
+    if (!flow) return;
+
+    const a = flow.lockPlayerAId ? flow.lockPlayerAId : createA;
+    const b = createB;
+
+    if (!a || !b) {
+      setStatus("Choose two different players.");
+      return;
+    }
+    if (a === b) {
+      setStatus("Pair must contain two different players.");
+      return;
+    }
+
+    // Exclude list check (opponent creation)
+    const excluded = flow.excludePlayerIds || [];
+    if (excluded.includes(a) || excluded.includes(b)) {
+      setStatus("This pair contains excluded player(s).");
       return;
     }
 
     setBusy(true);
     setStatus("Creating pair…");
     try {
-      const json = await apiPost("/api/pairs/create", { player1Id: mePlayer.id, player2Id: myPartnerId });
+      const json = await apiPost("/api/pairs/create", { player1Id: a, player2Id: b });
       if (!json.ok) {
         setStatus(`Create pair failed: ${json.error}`);
         setScreen("error");
         return;
       }
+
+      const createdPairId = json.pair?.id || "";
       await loadPairs();
-      setMyPairId(json.pair?.id || "");
-      setStatus("OK");
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  async function createOpponentPair(myPair: Pair | null) {
-    const myPl = pairPlayers(myPair);
-    if (!oppCreateP1 || !oppCreateP2) {
-      setStatus("Choose 2 opponent players.");
-      return;
-    }
-    if (oppCreateP1 === oppCreateP2) {
-      setStatus("Opponent pair must be 2 different players.");
-      return;
-    }
-    if (myPl.includes(oppCreateP1) || myPl.includes(oppCreateP2)) {
-      setStatus("Opponent pair cannot include your players.");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Creating opponent pair…");
-    try {
-      const json = await apiPost("/api/pairs/create", { player1Id: oppCreateP1, player2Id: oppCreateP2 });
-      if (!json.ok) {
-        setStatus(`Create opponent pair failed: ${json.error}`);
-        setScreen("error");
-        return;
+      // Route back depending on flow
+      if (flow.target === "my") {
+        setMyPairId(createdPairId);
+        setOppPairId("");
+        setTab("matches");
+      } else if (flow.target === "opp") {
+        setOppPairId(createdPairId);
+        setTab("matches");
+      } else {
+        setTab("pairs");
       }
-      await loadPairs();
-      setOppPairId(json.pair?.id || "");
+
+      setCreateFlow(null);
+      setCreateA("");
+      setCreateB("");
       setStatus("OK");
     } finally {
       setBusy(false);
@@ -301,8 +347,12 @@ export default function App() {
     const myPair = pairs.find((p) => p.id === myPairId) || null;
     const oppPair = pairs.find((p) => p.id === oppPairId) || null;
 
-    if (!myPair || !oppPair) {
-      setStatus("Select both pairs.");
+    if (!myPair) {
+      setStatus("Select your pair first.");
+      return;
+    }
+    if (!oppPair) {
+      setStatus("Select opponent pair first.");
       return;
     }
 
@@ -311,8 +361,8 @@ export default function App() {
       { p1: Number(s2a), p2: Number(s2b) },
     ];
 
-    const needThird = setsSplitAfter2(Number(s1a), Number(s1b), Number(s2a), Number(s2b));
-    if (needThird) sets.push({ p1: Number(s3a), p2: Number(s3b) });
+    const needThirdLocal = !s1err && !s2err && setsSplitAfter2(Number(s1a), Number(s1b), Number(s2a), Number(s2b));
+    if (needThirdLocal) sets.push({ p1: Number(s3a), p2: Number(s3b) });
 
     setBusy(true);
     setStatus("Saving…");
@@ -410,7 +460,7 @@ export default function App() {
 
   const s1err = validateSet(s1a, s1b, 1);
   const s2err = validateSet(s2a, s2b, 2);
-  const needThird = setsSplitAfter2(Number(s1a), Number(s1b), Number(s2a), Number(s2b));
+  const needThird = !s1err && !s2err && setsSplitAfter2(Number(s1a), Number(s1b), Number(s2a), Number(s2b));
   const s3err = needThird ? validateSet(s3a, s3b, 3) : null;
 
   const pairsErr =
@@ -419,7 +469,32 @@ export default function App() {
       : null;
 
   const canSave =
-    !busy && !!selectedMyPair && !!selectedOppPair && !pairsErr && !s1err && !s2err && (!needThird || !s3err);
+    !busy &&
+    !!selectedMyPair &&
+    !!selectedOppPair &&
+    !pairsErr &&
+    !s1err &&
+    !s2err &&
+    (!needThird || !s3err);
+
+  // Pairs create options based on flow
+  const createExcluded = createFlow?.excludePlayerIds || [];
+  const createAEffective = createFlow?.lockPlayerAId ? createFlow.lockPlayerAId : createA;
+
+  const playerOptionsFor = (excludeIds: string[], alsoExcludeId?: string) => {
+    const exclude = new Set([...(excludeIds || []), ...(alsoExcludeId ? [alsoExcludeId] : [])].filter(Boolean));
+    const list = players.filter((p) => !exclude.has(p.id));
+    return [
+      <option key="-" value="">
+        — select —
+      </option>,
+      ...list.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}
+        </option>
+      )),
+    ];
+  };
 
   // ---------- UI (padel colors) ----------
   const colors = {
@@ -558,22 +633,11 @@ export default function App() {
     return `${a} + ${b}`;
   };
 
-  const playerOptions = [
-    <option key="-" value="">
-      — select —
-    </option>,
-    ...players.map((p) => (
-      <option key={p.id} value={p.id}>
-        {p.name}
-      </option>
-    )),
-  ];
-
   // ---------- Screens ----------
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", background: colors.bg, minHeight: "100vh", color: colors.text }}>
       <div style={{ padding: 16, paddingBottom: 96, maxWidth: 960, margin: "0 auto" }}>
-        {/* Minimal header: title + tiny status */}
+        {/* Minimal header */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
           <div style={{ fontSize: 18, fontWeight: 1000, color: colors.navy }}>Padel League</div>
           <div style={{ fontSize: 12, color: colors.muted, textAlign: "right" }}>{status}</div>
@@ -582,10 +646,15 @@ export default function App() {
         {screen === "loading" && <div style={{ marginTop: 12, color: colors.muted }}>Loading…</div>}
 
         {screen === "join" && (
-          <div style={{ marginTop: 14 }}>
+          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
             <Card>
-              <div style={{ fontWeight: 1000, fontSize: 16, color: colors.navy }}>Join league</div>
-              <div style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 1000, fontSize: 16, color: colors.navy }}>Welcome</div>
+              <div style={{ marginTop: 8, fontSize: 13, color: colors.muted, lineHeight: 1.45 }}>
+                <div>• Join league and appear in leaderboard</div>
+                <div>• Create pairs, track pair rating</div>
+                <div>• Report match results and confirm them</div>
+              </div>
+              <div style={{ marginTop: 10 }}>
                 <Button onClick={joinLeague} disabled={busy}>
                   Join
                 </Button>
@@ -609,9 +678,28 @@ export default function App() {
 
         {screen === "app" && (
           <>
-            {/* League */}
+            {/* League (now includes the "home" info block) */}
             {tab === "league" && (
-              <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+              <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                <Card>
+                  <div style={{ fontWeight: 1000, color: colors.navy }}>How it works</div>
+                  <div style={{ marginTop: 8, fontSize: 13, color: colors.muted, lineHeight: 1.45 }}>
+                    <div>1) Create a pair in “Pairs”</div>
+                    <div>2) Report match in “Matches”</div>
+                    <div>3) Opponent confirms, then ratings update</div>
+                    <div style={{ marginTop: 8 }}>Set rules: 6-0..6-4, 7-5, 7-6</div>
+                  </div>
+
+                  <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                    <Button onClick={() => setTab("matches")} disabled={busy}>
+                      Report match
+                    </Button>
+                    <Button onClick={() => { startCreateAnyPair(); }} disabled={busy} variant="secondary">
+                      Create pair
+                    </Button>
+                  </div>
+                </Card>
+
                 {players.map((p, idx) => (
                   <Card key={p.id}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
@@ -628,81 +716,66 @@ export default function App() {
             {/* Matches */}
             {tab === "matches" && (
               <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-                {/* Report match (minimal) */}
                 <Card>
                   <div style={{ fontWeight: 1000, color: colors.navy }}>Report match</div>
 
                   <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                    {/* Your pair */}
-                    {myPairs.length > 0 ? (
-                      <Select value={myPairId} onChange={(e: any) => setMyPairId(e.target.value)} disabled={busy}>
-                        <option value="">Your pair…</option>
-                        {myPairs.map((p) => (
+                    {/* Step 1: My pair */}
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: colors.muted }}>Your pair</div>
+                      {myPairs.length > 0 ? (
+                        <Select value={myPairId} onChange={(e: any) => { setMyPairId(e.target.value); setOppPairId(""); }} disabled={busy}>
+                          <option value="">Select your pair…</option>
+                          {myPairs.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {pairLabel(p)}
+                            </option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <div style={{ display: "grid", gap: 10 }}>
+                          <div style={{ fontSize: 12, color: colors.muted }}>You don’t have a pair yet.</div>
+                          <Button onClick={startCreateMyPair} disabled={busy}>
+                            Create my pair
+                          </Button>
+                        </div>
+                      )}
+
+                      {myPairs.length > 0 && (
+                        <Button onClick={startCreateMyPair} disabled={busy} variant="secondary">
+                          Create another pair
+                        </Button>
+                      )}
+                    </div>
+
+                    {/* Step 2: Opponent pair */}
+                    <div style={{ display: "grid", gap: 8, opacity: selectedMyPair ? 1 : 0.6 }}>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: colors.muted }}>Opponent pair</div>
+
+                      <Select
+                        value={oppPairId}
+                        onChange={(e: any) => setOppPairId(e.target.value)}
+                        disabled={busy || !selectedMyPair}
+                      >
+                        <option value="">{selectedMyPair ? "Select opponent pair…" : "Select your pair first…"}</option>
+                        {opponentPairsFiltered.map((p) => (
                           <option key={p.id} value={p.id}>
                             {pairLabel(p)}
                           </option>
                         ))}
                       </Select>
-                    ) : (
-                      <div style={{ fontSize: 12, color: colors.muted }}>No pair yet. Create yours below.</div>
-                    )}
 
-                    {/* Create your pair */}
-                    <div
-                      style={{
-                        display: "grid",
-                        gap: 10,
-                        padding: 12,
-                        borderRadius: 14,
-                        border: `1px dashed ${colors.border}`,
-                      }}
-                    >
-                      <Select value={myPartnerId} onChange={(e: any) => setMyPartnerId(e.target.value)} disabled={busy}>
-                        <option value="">Partner…</option>
-                        {playerOptions}
-                      </Select>
-                      <Button onClick={createMyPair} disabled={busy || !mePlayer?.id || !myPartnerId}>
-                        Create my pair
+                      <Button onClick={startCreateOpponentPair} disabled={busy || !selectedMyPair} variant="secondary">
+                        Create opponent pair
                       </Button>
                     </div>
 
-                    {/* Opponent pair */}
-                    <Select value={oppPairId} onChange={(e: any) => setOppPairId(e.target.value)} disabled={busy || !selectedMyPair}>
-                      <option value="">Opponent pair…</option>
-                      {opponentPairsFiltered.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {pairLabel(p)}
-                        </option>
-                      ))}
-                    </Select>
-
-                    {/* Create opponent pair */}
-                    <details style={{ borderRadius: 14, border: `1px dashed ${colors.border}`, padding: 12 }}>
-                      <summary style={{ cursor: "pointer", fontWeight: 900, color: colors.muted }}>
-                        Create opponent pair
-                      </summary>
-                      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                        <Select value={oppCreateP1} onChange={(e: any) => setOppCreateP1(e.target.value)} disabled={busy || !selectedMyPair}>
-                          <option value="">Opponent player 1…</option>
-                          {playerOptions}
-                        </Select>
-                        <Select value={oppCreateP2} onChange={(e: any) => setOppCreateP2(e.target.value)} disabled={busy || !selectedMyPair}>
-                          <option value="">Opponent player 2…</option>
-                          {playerOptions}
-                        </Select>
-                        <Button
-                          onClick={() => createOpponentPair(selectedMyPair)}
-                          disabled={busy || !selectedMyPair || !oppCreateP1 || !oppCreateP2}
-                        >
-                          Create opponent pair
-                        </Button>
-                      </div>
-                    </details>
-
                     {pairsErr ? <div style={{ fontSize: 12, fontWeight: 900, color: colors.danger }}>{pairsErr}</div> : null}
 
-                    {/* Sets */}
-                    <div style={{ display: "grid", gap: 10, opacity: selectedMyPair && selectedOppPair ? 1 : 0.5 }}>
+                    {/* Step 3: Sets */}
+                    <div style={{ display: "grid", gap: 10, opacity: selectedMyPair && selectedOppPair ? 1 : 0.55 }}>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: colors.muted }}>Sets</div>
+
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                         <Input value={s1a} onChange={(e: any) => setS1a(e.target.value)} inputMode="numeric" disabled={busy || !selectedOppPair} placeholder="Set1 you" />
                         <Input value={s1b} onChange={(e: any) => setS1b(e.target.value)} inputMode="numeric" disabled={busy || !selectedOppPair} placeholder="Set1 opp" />
@@ -710,7 +783,7 @@ export default function App() {
                         <Input value={s2b} onChange={(e: any) => setS2b(e.target.value)} inputMode="numeric" disabled={busy || !selectedOppPair} placeholder="Set2 opp" />
                       </div>
 
-                      {s1err || s2err ? (
+                      {(s1err || s2err) ? (
                         <div style={{ fontSize: 12, fontWeight: 900, color: colors.danger }}>{s1err || s2err}</div>
                       ) : null}
 
@@ -731,7 +804,7 @@ export default function App() {
                   </div>
                 </Card>
 
-                {/* Matches list (minimal) */}
+                {/* Matches list */}
                 {matches.map((m) => {
                   const p1a = m.pair1Obj?.player1Obj?.name || "—";
                   const p1b = m.pair1Obj?.player2Obj?.name || "—";
@@ -770,7 +843,7 @@ export default function App() {
                       {canAct ? (
                         <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                           <Button onClick={() => confirmMatch(m.id)} disabled={busy}>
-                            Confirm (1 player enough)
+                            Confirm
                           </Button>
 
                           <details style={{ borderRadius: 14, border: `1px dashed ${colors.border}`, padding: 12 }}>
@@ -801,7 +874,80 @@ export default function App() {
 
             {/* Pairs */}
             {tab === "pairs" && (
-              <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+              <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                <Card>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                    <div style={{ fontWeight: 1000, color: colors.navy }}>Create pair</div>
+                    {!createFlow ? (
+                      <button
+                        onClick={startCreateAnyPair}
+                        disabled={busy}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          fontWeight: 1000,
+                          color: colors.green,
+                          cursor: busy ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        Open
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => { setCreateFlow(null); setCreateA(""); setCreateB(""); setStatus("OK"); }}
+                        disabled={busy}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          fontWeight: 1000,
+                          color: colors.muted,
+                          cursor: busy ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        Close
+                      </button>
+                    )}
+                  </div>
+
+                  {createFlow ? (
+                    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                      {createFlow.lockPlayerAId ? (
+                        <Select value={createAEffective} disabled>
+                          <option value={createAEffective}>
+                            {players.find((p) => p.id === createAEffective)?.name || "You"}
+                          </option>
+                        </Select>
+                      ) : (
+                        <Select
+                          value={createA}
+                          onChange={(e: any) => { setCreateA(e.target.value); if (createB === e.target.value) setCreateB(""); }}
+                          disabled={busy}
+                        >
+                          {playerOptionsFor(createExcluded)}
+                        </Select>
+                      )}
+
+                      <Select value={createB} onChange={(e: any) => setCreateB(e.target.value)} disabled={busy}>
+                        {playerOptionsFor(createExcluded, createAEffective || undefined)}
+                      </Select>
+
+                      <Button onClick={createPairSubmit} disabled={busy || !createAEffective || !createB || createAEffective === createB}>
+                        Create
+                      </Button>
+
+                      {createFlow.target !== "any" ? (
+                        <div style={{ fontSize: 12, color: colors.muted }}>
+                          After creation you will return to <b>{createFlow.returnTab}</b>.
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 8, fontSize: 12, color: colors.muted }}>
+                      Create pairs here. Reporting matches uses pairs only.
+                    </div>
+                  )}
+                </Card>
+
                 {pairs.map((p, idx) => (
                   <Card key={p.id}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
@@ -818,7 +964,7 @@ export default function App() {
         )}
       </div>
 
-      {/* ONLY bottom menu (tabs + refresh icon) */}
+      {/* Bottom menu + refresh icon */}
       {screen === "app" && (
         <div
           style={{
